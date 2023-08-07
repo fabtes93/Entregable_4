@@ -4,45 +4,16 @@ from airflow.operators.python_operator import PythonOperator
 import psycopg2
 import pandas as pd
 import marvel
-import smtplib
-from email import message
 from airflow.operators.email_operator import EmailOperator
-
-
 from airflow.utils.email import send_email
 
-email_success = 'SUCCESS'
-email_failure = 'FAILURE'
-
-
-def simular_error():
-    raise Exception('Error')
-
-def enviar_error():
-    enviar('ERROR')
-
-def enviar_success():
-    enviar('SUCCESS')
-
-def enviar(subject):
-    try:
-        x = smtplib.SMTP('smtp.gmail.com', 587)
-        x.starttls()
-        x.login(Variable.get('SMTP_EMAIL_FROM'), Variable.get('SMTP_PASSWORD'))
-        subject = f'El dag terminó {subject}'
-        body_text = subject
-        message = 'Subject: {}\n\n{}'.format(subject, body_text)
-        x.sendmail(Variable.get('SMTP_EMAIL_FROM'), Variable.get('SMTP_EMAIL_TO'), message)
-        print('Éxito al enviar el mail')
-    except Exception as exception:
-        print(exception)
-        print('Error al enviar el mail')
 
 public_key = Variable.get("public_key")
 private_key = Variable.get("private_key")
 
 
 redshift_conn_id = 'redshift_default'
+
 
 default_args = {
             'owner': 'FabiT',
@@ -52,6 +23,12 @@ default_args = {
             'retry_delay': timedelta(minutes=2),
             }
 
+host = Variable.get("redshift_host")
+port = Variable.get("redshift_port")
+database = Variable.get("redshift_database")
+user = Variable.get("redshift_user")
+password = Variable.get("redshift_password")
+table_name = Variable.get("redshift_table_name")
 
 dag = DAG('marvel_dag', default_args=default_args, schedule_interval=None)
 
@@ -116,13 +93,24 @@ def cargar_datos_redshift(**context):
             print("La tabla existe en Redshift.")
         else:
             print("La tabla no existe en Redshift.")
-            cursor.execute(f"CREATE TABLE {table_name} (name VARCHAR(255), comics VARCHAR(255), series VARCHAR(255), description TEXT, Apariciones_personajes INTEGER)")
+            cursor.execute(f"""
+                CREATE TABLE {table_name} (
+                    name VARCHAR(255),
+                    comics VARCHAR(255),
+                    series VARCHAR(255),
+                    description TEXT,
+                    Apariciones_personajes INTEGER,
+                    fecha_carga TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                DISTKEY(name)
+                SORTKEY(Apariciones_personajes)
+            """)
             conn.commit()
             print("Tabla creada en Redshift.")
 
         # Cargar datos desde el CSV a la tabla en Redshift
         with open(csv_filename, 'r') as f:
-            cursor.copy_from(f, table_name, sep=',', columns=('name', 'comics', 'series', 'description', 'Apariciones_personajes'))
+            cursor.copy_from(f, table_name, sep=',', columns=('name', 'comics', 'series', 'description', 'Apariciones_personajes', 'fecha_carga'))
 
         conn.commit()
         print("Datos cargados en Redshift.")
@@ -132,48 +120,85 @@ def cargar_datos_redshift(**context):
         cursor.close()
         conn.close()
 
+
+def enviar_error(context):
+    execution_date = context['execution_date']
+    dag_id = context['dag'].dag_id
+    task_id = context['task'].task_id
+    message = f"Error en el DAG '{dag_id}' Tarea '{task_id}' Tiempo: {execution_date}"
+    enviar_alerta_email(message)
+
+def enviar_success(context):
+    execution_date = context['execution_date']
+    dag_id = context['dag'].dag_id
+    task_id = context['task'].task_id
+    message = f"El DAG '{dag_id}' terminó correctamente Tarea '{task_id}' Tiempo: {execution_date}"
+    enviar_alerta_email(message)
+
+def enviar_alerta_email(message):
+    email_subject = "Alerta desde airflow"
+    email_to = [Variable.get('SMTP_EMAIL_TO')]
+    email_from = Variable.get('SMTP_EMAIL_FROM')
+    email_operator = EmailOperator(
+        task_id='enviar_alerta_email',
+        to=email_to,
+        subject=email_subject,
+        html_content=message,
+        mime_charset='utf-8',
+        params=None,
+        cc=None,
+        bcc=None,
+        reply_to=None,
+        retries=3,
+        retry_delay=timedelta(minutes=1)
+    )
+    email_operator.execute(context=None)
+
+
 with dag:
     task_buscarinfomarvel = PythonOperator(
         task_id='buscarinfomarvel',
-        python_callable=buscarinfomarvel
+        python_callable=buscarinfomarvel,
+        depends_on_past=True
     )
 
     task_personajesmarvel = PythonOperator(
         task_id='personajesmarvel',
-        python_callable=personajesmarvel
+        python_callable=personajesmarvel,
+        depends_on_past=True
     )
 
     task_guardar_csv = PythonOperator(
         task_id='guardar_csv',
         python_callable=guardar_csv,
-        provide_context=True  
+        depends_on_past=True
     )
 
     task_tablamarvel = PythonOperator(
         task_id='tablamarvel',
         python_callable=cargar_datos_redshift,
-        provide_context=True  
+        depends_on_past=True 
     )
 
     task_error = PythonOperator(
         task_id='dag_envio_error',
         python_callable=enviar_error,
-        trigger_rule='all_failed'
+        trigger_rule='all_failed',
+        provide_context=True
     )
     
     task_ok = PythonOperator(
         task_id='dag_envio_success',
         python_callable=enviar_success,
         trigger_rule='all_success',
+        provide_context=True
     )
 
-    # task_enviar = PythonOperator(
-    #     task_id='dag_marvel',
-    #     python_callable=enviar
-    # )
+    task_guardar_csv.set_upstream(task_personajesmarvel)
+    task_tablamarvel.set_upstream(task_guardar_csv)
+    task_tablamarvel.set_downstream([task_error, task_ok])
     
     task_buscarinfomarvel >> task_personajesmarvel >> task_guardar_csv >> task_tablamarvel >> [task_error, task_ok]
 
-#task_enviar
     
     
