@@ -59,9 +59,11 @@ def personajesmarvel():
         comics = ', '.join([comic['name'] for comic in character['comics']['items']])
         series = ', '.join([serie['name'] for serie in character['series']['items']])
         description = character['description']
-        data.append([name, comics, series, description])
+        alignment = character_info['alignment']
+        data.append([name, comics, series, description, alignment])
+        
 
-    df = pd.DataFrame(data, columns=['name', 'comics', 'series', 'description'])
+    df = pd.DataFrame(data, columns=['name', 'comics', 'series', 'description', 'alignment'])
     df['Apariciones_personajes'] = df['comics'].apply(lambda x: len(x.split(', ')))
 
     return df
@@ -99,6 +101,7 @@ def cargar_datos_redshift(**context):
                     comics VARCHAR(255),
                     series VARCHAR(255),
                     description TEXT,
+                    alignment VARCHAR(50),
                     Apariciones_personajes INTEGER,
                     fecha_carga TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -199,6 +202,11 @@ with dag:
     task_tablamarvel.set_downstream([task_error, task_ok])
     
     task_buscarinfomarvel >> task_personajesmarvel >> task_guardar_csv >> task_tablamarvel >> [task_error, task_ok]
+
+
+
+    
+    
 
     
     
